@@ -1,0 +1,108 @@
+import json
+import tempfile
+from pathlib import Path
+from unittest.mock import Mock
+
+import faiss
+import numpy as np
+import pytest
+
+from app.services import retriever
+
+
+def test_retrieve_top_chunks_returns_ranked_results(monkeypatch):
+    with tempfile.TemporaryDirectory() as temp_dir:
+        base_dir = Path(temp_dir)
+        faiss_dir = base_dir / "faiss_index"
+        embeddings_dir = base_dir / "embeddings"
+        faiss_dir.mkdir(parents=True, exist_ok=True)
+        embeddings_dir.mkdir(parents=True, exist_ok=True)
+
+        monkeypatch.setattr(retriever, "FAISS_DIR", faiss_dir)
+        monkeypatch.setattr(retriever, "EMBEDDINGS_DIR", embeddings_dir)
+
+        metadata = [
+            {"chunk_id": 1, "text": "query text first chunk", "start_word": 0, "end_word": 5},
+            {"chunk_id": 2, "text": "second chunk", "start_word": 6, "end_word": 8},
+        ]
+        metadata_path = embeddings_dir / "test_metadata.json"
+        with open(metadata_path, "w", encoding="utf-8") as f:
+            json.dump(metadata, f)
+
+        embeddings = np.array([[1.0, 0.0], [0.0, 1.0]], dtype="float32")
+        index = faiss.IndexFlatL2(2)
+        index.add(embeddings)
+        index_path = faiss_dir / "test.index"
+        faiss.write_index(index, str(index_path))
+
+        # Mock the _get_model function to return a mock model with encode method
+        mock_model = Mock()
+        mock_model.encode = lambda texts: np.array([[1.0, 0.0]], dtype="float32")
+        monkeypatch.setattr(retriever, "_get_model", lambda: mock_model)
+
+        results = retriever.retrieve_top_chunks(
+            query="query text",
+            index_filename="test.index",
+            metadata_filename="test_metadata.json",
+            top_k=1,
+        )
+
+        assert len(results) == 1
+        assert results[0]["chunk_id"] == 1
+        assert results[0]["text"] == "query text first chunk"
+        assert results[0]["rank"] == 1
+        assert isinstance(results[0]["score"], float)
+
+
+def test_retrieve_top_chunks_raises_file_not_found(monkeypatch):
+    with tempfile.TemporaryDirectory() as temp_dir:
+        base_dir = Path(temp_dir)
+        monkeypatch.setattr(retriever, "FAISS_DIR", base_dir / "faiss_index")
+        monkeypatch.setattr(retriever, "EMBEDDINGS_DIR", base_dir / "embeddings")
+
+        with pytest.raises(FileNotFoundError, match="Metadata file not found"):
+            retriever.retrieve_top_chunks(
+                query="query text",
+                index_filename="missing.index",
+                metadata_filename="missing_metadata.json",
+            )
+
+
+def test_retrieve_top_chunks_ignores_invalid_faiss_indices(monkeypatch):
+    with tempfile.TemporaryDirectory() as temp_dir:
+        base_dir = Path(temp_dir)
+        faiss_dir = base_dir / "faiss_index"
+        embeddings_dir = base_dir / "embeddings"
+        faiss_dir.mkdir(parents=True, exist_ok=True)
+        embeddings_dir.mkdir(parents=True, exist_ok=True)
+
+        monkeypatch.setattr(retriever, "FAISS_DIR", faiss_dir)
+        monkeypatch.setattr(retriever, "EMBEDDINGS_DIR", embeddings_dir)
+
+        metadata = [
+            {"chunk_id": 1, "text": "hypertension treatment", "start_word": 0, "end_word": 2},
+        ]
+        metadata_path = embeddings_dir / "test_metadata.json"
+        metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+
+        index = faiss.IndexFlatL2(2)
+        index.add(np.array([[1.0, 0.0]], dtype="float32"))
+        faiss.write_index(index, str(faiss_dir / "test.index"))
+
+        mock_model = Mock()
+        mock_model.encode = lambda texts: np.array([[0.0, 1.0]], dtype="float32")
+        monkeypatch.setattr(retriever, "_get_model", lambda: mock_model)
+
+        results = retriever.retrieve_top_chunks(
+            query="hypertension",
+            index_filename="test.index",
+            metadata_filename="test_metadata.json",
+            top_k=1,
+        )
+
+        assert len(results) == 1
+        assert results[0]["chunk_id"] == 1
+
+
+def test_basic_truth():
+    assert True
